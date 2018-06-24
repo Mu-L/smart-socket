@@ -9,11 +9,6 @@
 package org.smartboot.socket.transport;
 
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.smartboot.socket.Filter;
-import org.smartboot.socket.StateMachineEnum;
-
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InvalidObjectException;
@@ -21,6 +16,12 @@ import java.net.InetSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.AsynchronousSocketChannel;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.smartboot.socket.Plugin;
+import org.smartboot.socket.StateMachineEnum;
 
 /**
  * AIO传输层会话。
@@ -50,7 +51,7 @@ import java.util.concurrent.Semaphore;
  * @author 三刀
  * @version V1.0.0
  */
-public class AioSession<T> {
+public abstract class AioSession<T> {
     /**
      * Session状态:已关闭
      */
@@ -110,7 +111,13 @@ public class AioSession<T> {
     private Semaphore semaphore = new Semaphore(1);
     private IoServerConfig<T> ioServerConfig;
     private InputStream inputStream;
-
+    
+    /**
+     * session id的生成器
+     */
+    private static final AtomicInteger idGen = new AtomicInteger(0);
+    private int sessionId;
+    
     /**
      * @param channel
      * @param config
@@ -118,7 +125,8 @@ public class AioSession<T> {
      * @param writeCompletionHandler
      * @param serverSession          是否服务端Session
      */
-    AioSession(AsynchronousSocketChannel channel, IoServerConfig<T> config, ReadCompletionHandler<T> readCompletionHandler, WriteCompletionHandler<T> writeCompletionHandler, boolean serverSession) {
+    protected AioSession(AsynchronousSocketChannel channel, IoServerConfig<T> config, ReadCompletionHandler<T> readCompletionHandler, WriteCompletionHandler<T> writeCompletionHandler, boolean serverSession) {
+    	this.sessionId = idGen.incrementAndGet();
         this.channel = channel;
         this.readCompletionHandler = readCompletionHandler;
         this.writeCompletionHandler = writeCompletionHandler;
@@ -128,10 +136,10 @@ public class AioSession<T> {
         this.ioServerConfig = config;
         this.serverFlowLimit = serverSession && config.getWriteQueueSize() > 0 && config.isFlowControlEnabled() ? false : null;
         //触发状态机
-        config.getProcessor().stateEvent(this, StateMachineEnum.NEW_SESSION, null);
-        this.readBuffer = allocateReadBuffer(config.getReadBufferSize());
-        for (Filter<T> filter : config.getFilters()) {
-            filter.connected(this);
+        stateEvent(StateMachineEnum.NEW_SESSION, null);
+        this.readBuffer = newByteBuffer0(config.getReadBufferSize());
+        for (Plugin<T> plugin : config.getPlugins()) {
+            plugin.connected(this);
         }
     }
 
@@ -171,7 +179,7 @@ public class AioSession<T> {
             writeBuffer = headBuffer;
         } else {
             if (writeBuffer == null || totalSize << 1 <= writeBuffer.capacity() || totalSize > writeBuffer.capacity()) {
-                writeBuffer = allocateReadBuffer(totalSize);
+                writeBuffer = newByteBuffer0(totalSize);
             } else {
                 writeBuffer.clear().limit(totalSize);
             }
@@ -183,7 +191,7 @@ public class AioSession<T> {
         //如果存在流控并符合释放条件，则触发读操作
         //一定要放在continueWrite之前
         if (serverFlowLimit != null && serverFlowLimit && writeCacheQueue.size() < ioServerConfig.getReleaseLine()) {
-            ioServerConfig.getProcessor().stateEvent(this, StateMachineEnum.RELEASE_FLOW_LIMIT, null);
+            stateEvent(StateMachineEnum.RELEASE_FLOW_LIMIT, null);
             serverFlowLimit = false;
             continueRead();
         }
@@ -297,15 +305,15 @@ public class AioSession<T> {
             } catch (IOException e) {
                 logger.debug("close session exception", e);
             }
-            for (Filter<T> filter : ioServerConfig.getFilters()) {
-                filter.closed(this);
+            for (Plugin<T> plugin : ioServerConfig.getPlugins()) {
+                plugin.closed(this);
             }
-            ioServerConfig.getProcessor().stateEvent(this, StateMachineEnum.SESSION_CLOSED, null);
+            stateEvent(StateMachineEnum.SESSION_CLOSED, null);
         } else if ((writeBuffer == null || !writeBuffer.hasRemaining()) && (writeCacheQueue == null || writeCacheQueue.size() == 0) && semaphore.tryAcquire()) {
             close(true);
             semaphore.release();
         } else {
-            ioServerConfig.getProcessor().stateEvent(this, StateMachineEnum.SESSION_CLOSING, null);
+            stateEvent(StateMachineEnum.SESSION_CLOSING, null);
         }
     }
 
@@ -313,7 +321,7 @@ public class AioSession<T> {
      * 获取当前Session的唯一标识
      */
     public final String getSessionID() {
-        return "aioSession-" + hashCode();
+        return "aioSession-" + this.sessionId;
     }
 
     /**
@@ -324,6 +332,24 @@ public class AioSession<T> {
     }
 
     /**
+     * 处理接收到的消息
+     *
+     * @param msg     待处理的业务消息
+     */
+    protected abstract void process(T msg) throws Exception;
+
+    /**
+     * 状态机事件,当枚举事件发生时由框架触发该方法
+     *
+     * <p>{@link Plugin}属于通信级别的过滤器，监控全局系统服务状态；而状态机则是{@linkplain AioSession}内部的状态获取，相较于Plugin更加轻量灵活。</p>
+     *
+     * @param stateMachineEnum 状态枚举
+     * @param throwable        异常对象，如果存在的话
+     * @see StateMachineEnum
+     */
+    protected abstract void stateEvent(StateMachineEnum stateMachineEnum, Throwable throwable);
+    
+    /**
      * 触发通道的读操作，当发现存在严重消息积压时,会触发流控
      */
     void readFromChannel(boolean eof) {
@@ -333,13 +359,13 @@ public class AioSession<T> {
         while ((dataEntry = ioServerConfig.getProtocol().decode(readBuffer, this, eof)) != null) {
             //处理消息
             try {
-                for (Filter<T> h : ioServerConfig.getFilters()) {
-                    h.processFilter(this, dataEntry);
+                for (Plugin<T> h : ioServerConfig.getPlugins()) {
+                    h.process(this, dataEntry);
                 }
-                ioServerConfig.getProcessor().process(this, dataEntry);
+                process(dataEntry);
             } catch (Exception e) {
-                ioServerConfig.getProcessor().stateEvent(this, StateMachineEnum.PROCESS_EXCEPTION, e);
-                for (Filter<T> h : ioServerConfig.getFilters()) {
+                stateEvent(StateMachineEnum.PROCESS_EXCEPTION, e);
+                for (Plugin<T> h : ioServerConfig.getPlugins()) {
                     h.processFail(this, dataEntry, e);
                 }
             }
@@ -348,7 +374,7 @@ public class AioSession<T> {
 
         if (eof || status == SESSION_STATUS_CLOSING) {
             close(false);
-            ioServerConfig.getProcessor().stateEvent(this, StateMachineEnum.INPUT_SHUTDOWN, null);
+            stateEvent(StateMachineEnum.INPUT_SHUTDOWN, null);
             return;
         }
         if (status == SESSION_STATUS_CLOSED) {
@@ -369,7 +395,7 @@ public class AioSession<T> {
         //触发流控
         if (serverFlowLimit != null && writeCacheQueue.size() > ioServerConfig.getFlowLimitLine()) {
             serverFlowLimit = true;
-            ioServerConfig.getProcessor().stateEvent(this, StateMachineEnum.FLOW_LIMIT, null);
+            stateEvent(StateMachineEnum.FLOW_LIMIT, null);
         } else {
             continueRead();
         }
@@ -436,16 +462,7 @@ public class AioSession<T> {
         return this.ioServerConfig;
     }
 
-    /**
-     * 申请新ReadBuffer。
-     * <p>
-     * 重新申请readBuffer前请保证老的数据都正确处理
-     * </p>
-     *
-     * @param size
-     * @return
-     */
-    private ByteBuffer allocateReadBuffer(int size) {
+    private ByteBuffer newByteBuffer0(int size) {
         return ioServerConfig.isDirectBuffer() ? ByteBuffer.allocateDirect(size) : ByteBuffer.allocate(size);
     }
 
@@ -519,5 +536,29 @@ public class AioSession<T> {
                 AioSession.this.inputStream = null;
             }
         }
+    }
+    
+    @Override
+    public boolean equals(Object obj) {
+    	if(obj == null || !(obj instanceof AioSession)) {
+    		return false;
+    	}else {
+    		return this.sessionId == ((AioSession<T>)obj).sessionId;
+    	}
+    }
+    
+    @Override
+    public int hashCode() {
+    	return getSessionID().hashCode();
+    }
+    
+    @Override
+    public String toString() {
+    	try {
+			return "{" + getSessionID() + ", " + getRemoteAddress().getAddress().getHostAddress() + ":" + getRemoteAddress().getPort() + "}";
+		} catch (IOException e) {
+			e.printStackTrace();
+			return "{" + getSessionID() + ", " + e.getMessage() + "}";
+		}
     }
 }

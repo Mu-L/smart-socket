@@ -9,10 +9,6 @@
 
 package org.smartboot.socket.transport;
 
-import org.smartboot.socket.Filter;
-import org.smartboot.socket.MessageProcessor;
-import org.smartboot.socket.Protocol;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
@@ -22,6 +18,9 @@ import java.nio.channels.AsynchronousSocketChannel;
 import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ThreadFactory;
+
+import org.smartboot.socket.Plugin;
+import org.smartboot.socket.Protocol;
 
 /**
  * AIO实现的客户端服务。
@@ -72,13 +71,13 @@ public class AioQuickClient<T> {
      * @param host             远程服务器地址
      * @param port             远程服务器端口号
      * @param protocol         协议编解码
-     * @param messageProcessor 消息处理器
+     * @param sessionFactory   session工厂
      */
-    public AioQuickClient(String host, int port, Protocol<T> protocol, MessageProcessor<T> messageProcessor) {
+    public AioQuickClient(String host, int port, Protocol<T> protocol, SessionFactory<T> sessionFactory) {
         config.setHost(host);
         config.setPort(port);
         config.setProtocol(protocol);
-        config.setProcessor(messageProcessor);
+        config.setSessionFactory(sessionFactory);
     }
 
     /**
@@ -104,7 +103,7 @@ public class AioQuickClient<T> {
         //bind host
         socketChannel.connect(new InetSocketAddress(config.getHost(), config.getPort())).get();
         //连接成功则构造AIOSession对象
-        session = new AioSession<T>(socketChannel, config, new ReadCompletionHandler<T>(), new WriteCompletionHandler<T>(), false);
+        session = config.getSessionFactory().newSession(socketChannel, config, new ReadCompletionHandler<T>(), new WriteCompletionHandler<T>(), false);
         session.initSession();
     }
 
@@ -146,12 +145,13 @@ public class AioQuickClient<T> {
 
 
     /**
-     * 设置消息过滤器,执行顺序以数组中的顺序为准
+     * 设置插件,执行顺序以数组中的顺序为准
      *
-     * @param filters 过滤器数组
+     * @param plugins 插件数组
      */
-    public final AioQuickClient<T> setFilters(Filter<T>[] filters) {
-        this.config.setFilters(filters);
+    @SafeVarargs
+    public final AioQuickClient<T> setPlugins(Plugin<T>... plugins) {
+        this.config.setPlugins(plugins);
         return this;
     }
 

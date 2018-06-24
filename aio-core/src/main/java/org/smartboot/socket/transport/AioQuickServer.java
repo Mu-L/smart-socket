@@ -8,12 +8,6 @@
 
 package org.smartboot.socket.transport;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.smartboot.socket.Filter;
-import org.smartboot.socket.MessageProcessor;
-import org.smartboot.socket.Protocol;
-
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketOption;
@@ -23,7 +17,11 @@ import java.nio.channels.AsynchronousSocketChannel;
 import java.nio.channels.CompletionHandler;
 import java.util.Map;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.smartboot.socket.Plugin;
+import org.smartboot.socket.Protocol;
 
 /**
  * AIO服务端。
@@ -60,28 +58,28 @@ public class AioQuickServer<T> {
     protected WriteCompletionHandler<T> aioWriteCompletionHandler = new WriteCompletionHandler<>();
     private AsynchronousServerSocketChannel serverSocketChannel = null;
     private AsynchronousChannelGroup asynchronousChannelGroup;
-
+    
     /**
      * 设置服务端启动必要参数配置
      *
      * @param port             绑定服务端口号
      * @param protocol         协议编解码
-     * @param messageProcessor 消息处理器
+     * @param sessionFactory   session工厂
      */
-    public AioQuickServer(int port, Protocol<T> protocol, MessageProcessor<T> messageProcessor) {
+    public AioQuickServer(int port, Protocol<T> protocol, SessionFactory<T> sessionFactory) {
         config.setPort(port);
         config.setProtocol(protocol);
-        config.setProcessor(messageProcessor);
+        config.setSessionFactory(sessionFactory);
     }
 
     /**
      * @param host             绑定服务端Host地址
      * @param port             绑定服务端口号
      * @param protocol         协议编解码
-     * @param messageProcessor 消息处理器
+     * @param sessionFactory   session工厂
      */
-    public AioQuickServer(String host, int port, Protocol<T> protocol, MessageProcessor<T> messageProcessor) {
-        this(port, protocol, messageProcessor);
+    public AioQuickServer(String host, int port, Protocol<T> protocol, SessionFactory<T> sessionFactory) {
+        this(port, protocol, sessionFactory);
         config.setHost(host);
     }
 
@@ -141,6 +139,12 @@ public class AioQuickServer<T> {
             shutdown();
             throw e;
         }
+        
+        //start the plugins
+        for(Plugin<T> plugin : config.getPlugins()) {
+        	plugin.start();
+        }
+        
         LOGGER.info("smart-socket server started on port {}", config.getPort());
         LOGGER.info("smart-socket server config is {}", config);
     }
@@ -152,7 +156,7 @@ public class AioQuickServer<T> {
      */
     protected void createSession(AsynchronousSocketChannel channel) {
         //连接成功则构造AIOSession对象
-        AioSession<T> session = new AioSession<T>(channel, config, aioReadCompletionHandler, aioWriteCompletionHandler, true);
+    	AioSession<T> session = config.getSessionFactory().newSession(channel, config, aioReadCompletionHandler, aioWriteCompletionHandler, true);
         session.initSession();
     }
 
@@ -168,20 +172,20 @@ public class AioQuickServer<T> {
         } catch (IOException e) {
             LOGGER.warn(e.getMessage(), e);
         }
-        if (!asynchronousChannelGroup.isTerminated()) {
+        if (asynchronousChannelGroup != null) {
             try {
-                asynchronousChannelGroup.shutdownNow();
-            } catch (IOException e) {
-                LOGGER.error("shutdown exception", e);
-            }
+				asynchronousChannelGroup.shutdownNow();
+			} catch (IOException e) {
+				LOGGER.warn(e.getMessage(), e);
+			}
+            asynchronousChannelGroup = null;
         }
-        try {
-            asynchronousChannelGroup.awaitTermination(3, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            LOGGER.error("shutdown exception", e);
+        
+        //close the plugins
+        for(Plugin<T> plugin : config.getPlugins()) {
+        	plugin.stop();
         }
     }
-
 
     /**
      * 设置处理线程数量
@@ -195,13 +199,13 @@ public class AioQuickServer<T> {
 
 
     /**
-     * 设置消息过滤器,执行顺序以数组中的顺序为准
+     * 设置插件,执行顺序以数组中的顺序为准
      *
-     * @param filters 过滤器数组
+     * @param plugins 插件数组
      */
     @SafeVarargs
-    public final AioQuickServer<T> setFilters(Filter<T>... filters) {
-        this.config.setFilters(filters);
+    public final AioQuickServer<T> setPlugins(Plugin<T>... plugins) {
+        this.config.setPlugins(plugins);
         return this;
     }
 

@@ -8,14 +8,20 @@
 
 package org.smartboot.socket.transport;
 
-import org.smartboot.socket.Filter;
-import org.smartboot.socket.MessageProcessor;
-import org.smartboot.socket.Protocol;
-
 import java.net.SocketOption;
+import java.nio.channels.AsynchronousSocketChannel;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.smartboot.socket.Plugin;
+import org.smartboot.socket.Protocol;
+import org.smartboot.socket.StateMachineEnum;
 
 /**
  * Quickly服务端/客户端配置信息 T:解码后生成的对象类型
@@ -23,7 +29,7 @@ import java.util.Map;
  * @author 三刀
  * @version V1.0.0
  */
-final class IoServerConfig<T> {
+public final class IoServerConfig<T> {
 
     public static final String BANNER = "                               _                           _             _   \n" +
             "                              ( )_                        ( )           ( )_ \n" +
@@ -32,7 +38,7 @@ final class IoServerConfig<T> {
             "\\__, \\| ( ) ( ) |( (_| || |   | |_    \\__, \\( (_) )( (___ | |\\`\\ (  ___/| |_ \n" +
             "(____/(_) (_) (_)`\\__,_)(_)   `\\__)   (____/`\\___/'`\\____)(_) (_)`\\____)`\\__)";
 
-    public static final String VERSION = "v1.3.12";
+    public static final String VERSION = "v1.3.11";
     /**
      * 消息队列缓存大小
      */
@@ -52,17 +58,12 @@ final class IoServerConfig<T> {
     /**
      * 服务器消息拦截器
      */
-    private Filter<T>[] filters = new Filter[0];
+    private Set<Plugin<T>> plugins = new HashSet<>();
 
     /**
      * 服务器端口号
      */
     private int port = 8888;
-
-    /**
-     * 消息处理器
-     */
-    private MessageProcessor<T> processor;
 
     /**
      * 协议编解码
@@ -104,6 +105,70 @@ final class IoServerConfig<T> {
      */
     private Map<SocketOption<Object>, Object> socketOptions;
 
+    /**
+     * Session 工厂
+     * @return
+     */
+    private SessionFactory<T> sessionFactory;
+    
+    /**
+     * 默认的Session工厂 
+     */
+    private final SessionFactory<T> defaultFactory = new SessionFactory<T>() {
+
+		final Logger logger = LoggerFactory.getLogger(AioSession.class);
+
+		@Override
+		public AioSession<T> newSession(AsynchronousSocketChannel channel, IoServerConfig<T> config,
+										ReadCompletionHandler<T> readCompletionHandler, WriteCompletionHandler<T> writeCompletionHandler,
+										boolean serverSession) {
+			
+			
+			
+			return new AioSession<T>(channel, config, readCompletionHandler, writeCompletionHandler, serverSession) {
+				
+				@Override
+				protected void process(T msg) throws Exception {
+					logger.info("process:{}, msg:{}", toString(), msg);					
+				}
+
+				@Override
+				protected void stateEvent(StateMachineEnum stateMachineEnum, Throwable throwable) {
+					switch (stateMachineEnum) {
+				    case NEW_SESSION:
+				    	logger.info("new session:{}, throwable:{}", toString(), throwable);
+				        break;
+				    case INPUT_SHUTDOWN:
+				    	logger.info("input shutdown:{}, throwable:{}", toString(), throwable);
+				        break;
+				    case INPUT_EXCEPTION:
+				    	logger.info("input exception:{}, throwable:{}", toString(), throwable);
+				        break;
+				    case OUTPUT_EXCEPTION:
+				    	logger.info("output exception:{}, throwable:{}", toString(), throwable);
+				        break;
+				    case SESSION_CLOSING:
+				    	logger.info("session closing:{}, throwable:{}", toString(), throwable);
+				        break;
+				    case SESSION_CLOSED:
+				    	logger.info("session closed:{{}}, throwable:{}", getSessionID(), throwable);
+				        break;
+				    case FLOW_LIMIT:
+				    	logger.info("flow limit:{}, throwable:{}", toString(), throwable);
+				        break;
+				    case RELEASE_FLOW_LIMIT:
+				    	logger.info("release flow limit:{}, throwable:{}", toString(), throwable);
+				        break;
+					default:
+						break;
+				}
+				}
+				
+			};
+		}
+    	
+    };
+    
     public final String getHost() {
         return host;
     }
@@ -128,14 +193,20 @@ final class IoServerConfig<T> {
         this.threadNum = threadNum;
     }
 
-
-    public final Filter<T>[] getFilters() {
-        return filters;
+    public final Set<Plugin<T>> getPlugins() {
+        return Collections.unmodifiableSet(plugins);
     }
 
-    public final void setFilters(Filter<T>[] filters) {
-        if (filters != null) {
-            this.filters = filters;
+    public final void addPlugin(Plugin<T> plugin) {
+    	if(plugin != null) {
+    		this.plugins.add(plugin);
+    	}
+    }
+    
+    public final void setPlugins(Plugin<T>[] plugins) {
+        if (plugins != null) {
+        	this.plugins.clear();
+        	this.plugins.addAll(Arrays.asList(plugins));
         }
     }
 
@@ -145,14 +216,6 @@ final class IoServerConfig<T> {
 
     public void setProtocol(Protocol<T> protocol) {
         this.protocol = protocol;
-    }
-
-    public final MessageProcessor<T> getProcessor() {
-        return processor;
-    }
-
-    public final void setProcessor(MessageProcessor<T> processor) {
-        this.processor = processor;
     }
 
     public int getWriteQueueSize() {
@@ -216,15 +279,26 @@ final class IoServerConfig<T> {
         this.flowControlEnabled = flowControlEnabled;
     }
 
+    public void setSessionFactory(SessionFactory<T> factory) {
+    	this.sessionFactory = factory;
+    }
+    
+    public SessionFactory<T> getSessionFactory() {
+    	if(this.sessionFactory != null) {
+    		return this.sessionFactory;
+    	}else {
+    		return this.defaultFactory;
+    	}
+    }
+    
     @Override
     public String toString() {
         return "IoServerConfig{" +
                 "writeQueueSize=" + writeQueueSize +
                 ", readBufferSize=" + readBufferSize +
                 ", host='" + host + '\'' +
-                ", filters=" + Arrays.toString(filters) +
+                ", plugins=" + Arrays.toString(plugins.toArray(new Plugin[plugins.size()])) +
                 ", port=" + port +
-                ", processor=" + processor +
                 ", protocol=" + protocol +
                 ", directBuffer=" + directBuffer +
                 ", threadNum=" + threadNum +
