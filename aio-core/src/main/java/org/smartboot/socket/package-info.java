@@ -4,8 +4,9 @@
  *
  *
  * <p>
- *     用户进行通信开发时需要实现该package中的接口，通常情况下仅需实现{@link org.smartboot.socket.Protocol}、{@link org.smartboot.socket.MessageProcessor}即可。
- *     如需进行整个服务级别的监控、维护，可选择性的使用{@link org.smartboot.socket.Filter}。
+ *     用户进行通信开发时需要实现该package中的接口，通常情况下仅需实现{@link org.smartboot.socket.Protocol}接口，
+ *     {@link org.smartboot.socket.AioSession}即可。
+ *     如需进行整个服务级别的监控、维护，可选择性的使用{@link org.smartboot.socket.Plugin}。
  * </p>
  *
  * <p>

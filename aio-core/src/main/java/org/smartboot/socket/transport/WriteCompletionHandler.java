@@ -10,7 +10,7 @@ package org.smartboot.socket.transport;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.smartboot.socket.Filter;
+import org.smartboot.socket.Plugin;
 import org.smartboot.socket.StateMachineEnum;
 
 import java.nio.channels.CompletionHandler;
@@ -21,14 +21,14 @@ import java.nio.channels.CompletionHandler;
  * @author 三刀
  * @version V1.0.0
  */
-class WriteCompletionHandler<T> implements CompletionHandler<Integer, AioSession<T>> {
+public final class WriteCompletionHandler<T> implements CompletionHandler<Integer, AioSession<T>> {
     private static final Logger LOGGER = LoggerFactory.getLogger(WriteCompletionHandler.class);
 
     @Override
     public void completed(final Integer result, final AioSession<T> aioSession) {
         // 接收到的消息进行预处理
-        for (Filter<T> h : aioSession.getServerConfig().getFilters()) {
-            h.writeFilter(aioSession, result);
+        for (Plugin<T> plugin : aioSession.getServerConfig().getPlugins()) {
+            plugin.writeCompleted(aioSession, result);
         }
         aioSession.writeToChannel();
     }
@@ -39,7 +39,7 @@ class WriteCompletionHandler<T> implements CompletionHandler<Integer, AioSession
             LOGGER.debug("smart-socket write fail:", exc);
         }
         try {
-            aioSession.getServerConfig().getProcessor().stateEvent(aioSession, StateMachineEnum.OUTPUT_EXCEPTION, exc);
+            aioSession.stateEvent(StateMachineEnum.OUTPUT_EXCEPTION, exc);
         } catch (Exception e) {
             LOGGER.debug(e.getMessage(), e);
         }

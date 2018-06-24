@@ -10,7 +10,7 @@ package org.smartboot.socket.transport;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.smartboot.socket.Filter;
+import org.smartboot.socket.Plugin;
 import org.smartboot.socket.StateMachineEnum;
 
 import java.io.IOException;
@@ -22,14 +22,14 @@ import java.nio.channels.CompletionHandler;
  * @author 三刀
  * @version V1.0.0
  */
-class ReadCompletionHandler<T> implements CompletionHandler<Integer, AioSession<T>> {
+public final class ReadCompletionHandler<T> implements CompletionHandler<Integer, AioSession<T>> {
     private static final Logger LOGGER = LoggerFactory.getLogger(ReadCompletionHandler.class);
 
     @Override
     public void completed(final Integer result, final AioSession<T> aioSession) {
         // 接收到的消息进行预处理
-        for (Filter<T> h : aioSession.getServerConfig().getFilters()) {
-            h.readFilter(aioSession, result);
+        for (Plugin<T> h : aioSession.getServerConfig().getPlugins()) {
+            h.readCompleted(aioSession, result);
         }
         aioSession.readFromChannel(result == -1);
     }
@@ -47,7 +47,7 @@ class ReadCompletionHandler<T> implements CompletionHandler<Integer, AioSession<
         }
 
         try {
-            aioSession.getServerConfig().getProcessor().stateEvent(aioSession, StateMachineEnum.INPUT_EXCEPTION, exc);
+            aioSession.stateEvent(StateMachineEnum.INPUT_EXCEPTION, exc);
         } catch (Exception e) {
             LOGGER.debug(e.getMessage(), e);
         }
