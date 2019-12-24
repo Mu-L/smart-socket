@@ -5,14 +5,12 @@ smart-socket是一款国产开源的Java AIO框架，追求代码量、性能、
 
 **官方QQ群：** 172299083🈵 、**830015805**（入群条件：***Star本项目***，非技术人员请勿扰，感谢）
 
-# 一款国产Servlet容器正在紧张研发中，如果您熟悉Servlet规范，对Tomcat、Undertow等源码有一定的了解，欢迎加入一起研发 [>>项目入口](https://gitee.com/smartboot/smart-http/tree/smart-servlet/)#
-
 ### 版本说明
 
 |  系列  | 版本   |  文档  | 说明 |
 | -- | -- | -- | -- |
 |  1.3  |  [1.3.25](https://mvnrepository.com/artifact/org.smartboot.socket/aio-core/1.3.25)  |  暂停维护  | 企业级，已稳定运行在众多企业的生产环境上 |
-|  1.4  |  [1.4.6](https://mvnrepository.com/artifact/org.smartboot.socket/aio-core/1.4.6) |  《[smart-socket技术小册](https://smartboot.gitee.io/book/)》 |最新稳定版|
+|  1.4  |  [1.4.7](https://mvnrepository.com/artifact/org.smartboot.socket/aio-core/1.4.7) |  《[smart-socket技术小册](https://smartboot.gitee.io/book/)》 |最新稳定版|
 |  1.4  |  1.4.7-SNAPSHOT |  《[smart-socket技术小册](https://smartboot.gitee.io/book/)》 |开发版，仅供学习交流，切勿在生产环境使用|
 
 ### Feature
