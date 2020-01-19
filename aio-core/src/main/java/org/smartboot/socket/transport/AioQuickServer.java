@@ -138,13 +138,24 @@ public class AioQuickServer<T> {
             serverSocketChannel.accept(serverSocketChannel, new CompletionHandler<AsynchronousSocketChannel, AsynchronousServerSocketChannel>() {
                 @Override
                 public void completed(final AsynchronousSocketChannel channel, AsynchronousServerSocketChannel serverSocketChannel) {
-                    serverSocketChannel.accept(serverSocketChannel, this);
+                    boolean exception = false;
+                    try {
+                        serverSocketChannel.accept(serverSocketChannel, this);
+                    } catch (Exception e) {
+                        exception = true;
+                        e.printStackTrace();
+                        failed(e, serverSocketChannel);
+                    }
                     NetMonitor<T> monitor = config.getMonitor();
                     if (monitor == null || monitor.acceptMonitor(channel)) {
                         createSession(channel);
                     } else {
                         config.getProcessor().stateEvent(null, StateMachineEnum.REJECT_ACCEPT, null);
                         closeChannel(channel);
+                    }
+                    if (exception) {
+                        LOGGER.warn("exception ,try accept again");
+                        serverSocketChannel.accept(serverSocketChannel, this);
                     }
                 }
 
