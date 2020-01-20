@@ -136,16 +136,11 @@ public class AioQuickServer<T> {
             }
 
             serverSocketChannel.accept(serverSocketChannel, new CompletionHandler<AsynchronousSocketChannel, AsynchronousServerSocketChannel>() {
+                int times = 0;
+
                 @Override
                 public void completed(final AsynchronousSocketChannel channel, AsynchronousServerSocketChannel serverSocketChannel) {
-                    boolean exception = false;
-                    try {
-                        serverSocketChannel.accept(serverSocketChannel, this);
-                    } catch (Exception e) {
-                        exception = true;
-                        e.printStackTrace();
-                        failed(e, serverSocketChannel);
-                    }
+                    serverSocketChannel.accept(serverSocketChannel, this);
                     NetMonitor<T> monitor = config.getMonitor();
                     if (monitor == null || monitor.acceptMonitor(channel)) {
                         createSession(channel);
@@ -153,15 +148,14 @@ public class AioQuickServer<T> {
                         config.getProcessor().stateEvent(null, StateMachineEnum.REJECT_ACCEPT, null);
                         closeChannel(channel);
                     }
-                    if (exception) {
-                        LOGGER.warn("exception ,try accept again");
-                        serverSocketChannel.accept(serverSocketChannel, this);
-                    }
                 }
 
                 @Override
                 public void failed(Throwable exc, AsynchronousServerSocketChannel serverSocketChannel) {
                     LOGGER.error("smart-socket server accept fail", exc);
+                    if (times++ < 10) {
+                        serverSocketChannel.accept(serverSocketChannel, this);
+                    }
                 }
             });
         } catch (IOException e) {
