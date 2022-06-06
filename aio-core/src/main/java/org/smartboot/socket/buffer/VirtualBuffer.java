@@ -49,12 +49,22 @@ public final class VirtualBuffer {
      */
     private int capacity;
 
+    private int index = -1;
+
     VirtualBuffer(BufferPage bufferPage, ByteBuffer buffer, int parentPosition, int parentLimit) {
         this.bufferPage = bufferPage;
         this.buffer = buffer;
         this.parentPosition = parentPosition;
         this.parentLimit = parentLimit;
         updateCapacity();
+    }
+
+    public int getIndex() {
+        return index;
+    }
+
+    public void setIndex(int index) {
+        this.index = index;
     }
 
     public static VirtualBuffer wrap(ByteBuffer buffer) {

@@ -26,11 +26,11 @@ import java.util.concurrent.locks.ReentrantLock;
  * @author 三刀
  * @version V1.0 , 2018/10/31
  */
-public final class BufferPage {
+public class BufferPage {
     /**
      * 同组内存池中的各内存页
      */
-    private final BufferPage[] poolPages;
+    protected BufferPage[] poolPages;
     /**
      * 条件锁
      */
@@ -61,6 +61,10 @@ public final class BufferPage {
         availableBuffers = new LinkedList<>();
         this.buffer = allocate0(size, direct);
         availableBuffers.add(new VirtualBuffer(this, null, buffer.position(), buffer.limit()));
+    }
+
+    void setPoolPages(BufferPage[] poolPages) {
+        this.poolPages = poolPages;
     }
 
     /**
@@ -274,7 +278,7 @@ public final class BufferPage {
      */
     void release() {
         if (buffer.isDirect()) {
-            Unsafe.getUnsafe().invokeCleaner(buffer);
+            //Unsafe.getUnsafe().invokeCleaner(buffer);
         }
     }
 

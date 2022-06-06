@@ -40,6 +40,8 @@ public final class BufferPagePool {
     private BufferPage[] bufferPages;
     private boolean enabled = true;
 
+    private static final BufferPageFactory FACTORY = new DefaultBufferPageFactory();
+
     /**
      * @param pageSize 内存页大小
      * @param pageNum  内存页个数
@@ -48,7 +50,9 @@ public final class BufferPagePool {
     public BufferPagePool(final int pageSize, final int pageNum, final boolean isDirect) {
         bufferPages = new BufferPage[pageNum];
         for (int i = 0; i < pageNum; i++) {
-            bufferPages[i] = new BufferPage(bufferPages, pageSize, isDirect);
+            bufferPages[i] = FACTORY.create(pageSize, isDirect);
+            bufferPages[i].setPoolPages(bufferPages);
+                    //new BufferPage(bufferPages, pageSize, isDirect);
         }
         if (pageNum == 0 || pageSize == 0) {
             future.cancel(false);
