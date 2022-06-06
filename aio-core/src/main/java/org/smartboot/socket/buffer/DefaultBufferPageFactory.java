@@ -12,7 +12,7 @@ public class DefaultBufferPageFactory implements BufferPageFactory {
 
     @Override
     public BufferPage create(int size, boolean direct) {
-        if (Boolean.getBoolean(System.getProperty("smart-socket-memory-optimized"))) {
+        if (Boolean.getBoolean("smart-socket-memory-optimized")) {
             System.out.println("Use fixed page");
             return new FixedBufferPage(EMPTY, size, direct);
         }

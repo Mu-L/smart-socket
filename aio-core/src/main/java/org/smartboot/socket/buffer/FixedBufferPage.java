@@ -16,7 +16,7 @@ public class FixedBufferPage extends BufferPage {
 
     private static final int CLEAN = 0;
     private static final int DIRTY = 1;
-    private static final int FIXED_SIZE = 1024;
+    private static final int FIXED_SIZE = 4096;
 
     private static long arrayOffset;
     private static int arrayScale;
@@ -27,6 +27,7 @@ public class FixedBufferPage extends BufferPage {
     private VirtualBuffer[] virtualBuffers;
     private int[] bitMap;
     private volatile boolean running;
+    private static final Unsafe unsafe = UnSafeUtils.getUnsafe();
 
     FixedBufferPage(BufferPage[] poolPages, int size, boolean direct) {
         super(poolPages, 0, direct);
@@ -59,10 +60,19 @@ public class FixedBufferPage extends BufferPage {
             return null;
         }
 
+        Thread thread = Thread.currentThread();
+        if (thread instanceof FastBufferThread) {
+            FastBufferThread fastBufferThread = (FastBufferThread) thread;
+            if (poolPages[fastBufferThread.getPageIndex()] != this) {
+                return poolPages[fastBufferThread.getPageIndex()].allocate(size);
+            }
+        }
+
         VirtualBuffer allocated = null;
         for (int i = 0; i < part; i++) {
-            if (bitMap[i] == CLEAN && Unsafe.getUnsafe().compareAndSwapInt(bitMap, arrayOffset + shift << i, CLEAN, DIRTY)) {
+            if (bitMap[i] == CLEAN && unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)i << shift), CLEAN, DIRTY)) {
                 allocated = virtualBuffers[i];
+                break;
             }
         }
 
@@ -73,11 +83,19 @@ public class FixedBufferPage extends BufferPage {
 //                    return allocated;
 //                }
 //            }
-            System.out.println("disabled allocate from other page.");
+            int c = 0;
+            for (int i = 0; i < part; i++) {
+
+                if (bitMap[i] == CLEAN) {
+                    c++;
+                }
+            }
+
+            System.out.println("disabled allocate from other page." + c);
 
         }
 
-        return null;
+        return allocated;
     }
 
     @Override
@@ -94,9 +112,15 @@ public class FixedBufferPage extends BufferPage {
         if (bitMap[cleanIndex] == CLEAN) {
             // Error invoke.
             System.out.println("Error clean in index " + cleanIndex);
+            return;
         }
 
-        Unsafe.getUnsafe().compareAndSwapInt(bitMap, arrayOffset + shift << cleanIndex, DIRTY, CLEAN);
+        if (unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)cleanIndex << shift), DIRTY, CLEAN)) {
+            cleanBuffer.buffer().clear();
+            cleanBuffer.recycle();
+        } else {
+            System.out.println("failed to clean");
+        }
 
     }
 
@@ -118,12 +142,12 @@ public class FixedBufferPage extends BufferPage {
 
     @Override
     public String toString() {
-        return "fixed-buffer-page size " + this.size + " bitMap " + Arrays.toString(bitMap);
+        return "fixed-buffer-page size " + this.size /*+ " bitMap " + Arrays.toString(bitMap)*/;
     }
 
     static {
-        arrayOffset = Unsafe.getUnsafe().arrayBaseOffset(int[].class);
-        arrayScale = Unsafe.getUnsafe().arrayIndexScale(int[].class);
+        arrayOffset = unsafe.arrayBaseOffset(int[].class);
+        arrayScale = unsafe.arrayIndexScale(int[].class);
         shift = 31 - Integer.numberOfLeadingZeros(arrayScale);
     }
 }

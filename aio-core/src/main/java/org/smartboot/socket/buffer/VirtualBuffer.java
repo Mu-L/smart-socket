@@ -116,6 +116,10 @@ public final class VirtualBuffer {
         clean.release();
     }
 
+    void recycle() {
+        clean.release();
+    }
+
     /**
      * 释放虚拟缓冲区
      */
