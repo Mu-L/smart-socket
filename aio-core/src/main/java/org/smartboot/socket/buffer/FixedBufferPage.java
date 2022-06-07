@@ -42,7 +42,7 @@ public class FixedBufferPage extends BufferPage {
         this.virtualBuffers = new VirtualBuffer[part];
         this.bitMap = new int[part];
         for (int i = 0; i < part; i++) {
-            VirtualBuffer vb = new VirtualBuffer(this, allocate(direct), 0, 0);
+            VirtualBuffer vb = new VirtualBuffer(this, allocate(direct), 0, FIXED_SIZE);
             virtualBuffers[i] = vb;
             vb.setIndex(i);
             this.bitMap[i] = CLEAN;
@@ -95,6 +95,11 @@ public class FixedBufferPage extends BufferPage {
 
         }
 
+        if (allocated != null) {
+            allocated.buffer().clear();
+            allocated.recycle();
+        }
+
         return allocated;
     }
 
@@ -116,8 +121,7 @@ public class FixedBufferPage extends BufferPage {
         }
 
         if (unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)cleanIndex << shift), DIRTY, CLEAN)) {
-            cleanBuffer.buffer().clear();
-            cleanBuffer.recycle();
+
         } else {
             System.out.println("failed to clean");
         }
