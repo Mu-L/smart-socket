@@ -1,11 +1,9 @@
 package org.smartboot.socket.buffer;
 
 import sun.misc.Unsafe;
+import sun.nio.ch.DirectBuffer;
 
 import java.nio.ByteBuffer;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -15,25 +13,30 @@ import java.util.concurrent.atomic.LongAdder;
  */
 public class FixedBufferPage extends BufferPage {
 
+    /**
+     * Clean
+     */
     private static final int CLEAN = 0;
+
+    /**
+     * Dirty
+     */
     private static final int DIRTY = 1;
     private static final int FIXED_SIZE = 4096;
 
-    private static long arrayOffset;
-    private static int arrayScale;
-    private static int shift;
-    private static long cursorShift;
+    private static final long ARRAY_BASE_OFFSET;
+    private static final int ARRAY_SHIFT;
+    private static final long CURSOR_OFFSET;
+    private static final Unsafe UNSAFE = UnSafeUtils.getUnsafe();
 
-    private int size;
-    private int part;
-    private VirtualBuffer[] virtualBuffers;
-    private int[] bitMap;
+    /**
+     * The bufferPage's size.
+     */
+    private final int size;
+    private final int part;
+    private final VirtualBuffer[] virtualBuffers;
+    private final int[] bitMap;
     private volatile boolean running;
-    private static final Unsafe unsafe = UnSafeUtils.getUnsafe();
-    private final LongAdder allocatedCnt = new LongAdder();
-    private final LongAdder allocatedTimes = new LongAdder();
-    private final LongAdder releasedCnt = new LongAdder();
-    private final LongAdder releasedTimes = new LongAdder();
     private final LongAdder used = new LongAdder();
     private int cursor;
 
@@ -76,8 +79,6 @@ public class FixedBufferPage extends BufferPage {
             }
         }
 
-        long escaped = System.nanoTime();
-        allocatedCnt.add(1);
         if (used.sum() >= part) {
             return null;
         }
@@ -85,8 +86,8 @@ public class FixedBufferPage extends BufferPage {
         used.add(1);
         int start = cursor;
         for (;;) {
-            if (unsafe.compareAndSwapInt(this, cursorShift, start, start + 1)) {
-                if (start < part && bitMap[start] == CLEAN && unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)start << shift), CLEAN, DIRTY)) {
+            if (UNSAFE.compareAndSwapInt(this, CURSOR_OFFSET, start, start + 1)) {
+                if (start < part && bitMap[start] == CLEAN && UNSAFE.compareAndSwapInt(bitMap, ARRAY_BASE_OFFSET + ((long)start << ARRAY_SHIFT), CLEAN, DIRTY)) {
                     allocated = virtualBuffers[start];
                     allocated.buffer().clear();
                     allocated.recycle();
@@ -101,10 +102,9 @@ public class FixedBufferPage extends BufferPage {
 
         }
 
-
-
+        // slow allocated
         for (int i = 0; i < part; i++) {
-            if (bitMap[i] == CLEAN && unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)i << shift), CLEAN, DIRTY)) {
+            if (bitMap[i] == CLEAN && UNSAFE.compareAndSwapInt(bitMap, ARRAY_BASE_OFFSET + ((long)i << ARRAY_SHIFT), CLEAN, DIRTY)) {
                 allocated = virtualBuffers[i];
                 break;
             }
@@ -114,8 +114,6 @@ public class FixedBufferPage extends BufferPage {
             allocated.buffer().clear();
             allocated.recycle();
         }
-
-        allocatedTimes.add(System.nanoTime() - escaped);
         return allocated;
     }
 
@@ -129,23 +127,14 @@ public class FixedBufferPage extends BufferPage {
             return;
         }
 
-        long time = System.nanoTime();
-        releasedCnt.add(1);
         used.add(-1);
         int cleanIndex = cleanBuffer.getIndex();
         if (bitMap[cleanIndex] == CLEAN) {
             // Error invoke.
-            System.out.println("Error clean in index " + cleanIndex);
             return;
         }
 
-        if (unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)cleanIndex << shift), DIRTY, CLEAN)) {
-
-        } else {
-            System.out.println("failed to clean");
-        }
-
-        releasedTimes.add(System.nanoTime() - time);
+        UNSAFE.compareAndSwapInt(bitMap, ARRAY_BASE_OFFSET + ((long)cleanIndex << ARRAY_SHIFT), DIRTY, CLEAN);
     }
 
     @Override
@@ -159,31 +148,29 @@ public class FixedBufferPage extends BufferPage {
 
         for (int i = 0; i < virtualBuffers.length; i++) {
             bitMap[i] = DIRTY;
+            ByteBuffer buffer = virtualBuffers[i].buffer();
+            if (buffer instanceof DirectBuffer) {
+                ((DirectBuffer)buffer).cleaner().clean();
+            }
             virtualBuffers[i] = null;
         }
-
+        // invoke super
+        super.release();
     }
 
     @Override
     public String toString() {
-        long ac = allocatedCnt.longValue();
-        long at = allocatedTimes.longValue();
-        long rc = releasedCnt.longValue();
-        long rt = releasedTimes.longValue();
-
-
-        return String.format("fixed-buffer-page size, allocatedTimes(%d)/allocatedCnt(%d) = %.10f, releaseTimes(%d)/releaseCnt(%d) = %.10f ",
-                at, ac, at*1.0/ac, rt, rc, rt*1.0/rc);
+        return "fixed-buffer-page, size = " + size + " used-buffers = " + used.sum();
     }
 
     static {
         try {
-            arrayOffset = unsafe.arrayBaseOffset(int[].class);
-            arrayScale = unsafe.arrayIndexScale(int[].class);
-            shift = 31 - Integer.numberOfLeadingZeros(arrayScale);
-            cursorShift = unsafe.objectFieldOffset(FixedBufferPage.class.getDeclaredField("cursor"));
+            ARRAY_BASE_OFFSET = UNSAFE.arrayBaseOffset(int[].class);
+            int arrayScale = UNSAFE.arrayIndexScale(int[].class);
+            ARRAY_SHIFT = 31 - Integer.numberOfLeadingZeros(arrayScale);
+            CURSOR_OFFSET = UNSAFE.objectFieldOffset(FixedBufferPage.class.getDeclaredField("cursor"));
         } catch (Exception e) {
-            e.printStackTrace();
+            throw new RuntimeException("unable to find object offset", e);
         }
     }
 }

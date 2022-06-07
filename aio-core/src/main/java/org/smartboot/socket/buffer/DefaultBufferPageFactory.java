@@ -8,12 +8,12 @@ package org.smartboot.socket.buffer;
 public class DefaultBufferPageFactory implements BufferPageFactory {
 
     private static final BufferPage[] EMPTY = new BufferPage[0];
+    private static final String KEY = "smart-socket-memory-optimized";
 
 
     @Override
     public BufferPage create(int size, boolean direct) {
-        if (Boolean.getBoolean("smart-socket-memory-optimized")) {
-            System.out.println("Use fixed page");
+        if (Boolean.getBoolean(KEY)) {
             return new FixedBufferPage(EMPTY, size, direct);
         }
 
