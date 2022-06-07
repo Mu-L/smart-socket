@@ -9,7 +9,7 @@
 
 package org.smartboot.socket.buffer;
 
-import sun.misc.Unsafe;
+import sun.nio.ch.DirectBuffer;
 
 import java.nio.ByteBuffer;
 import java.util.Iterator;
@@ -43,7 +43,7 @@ public class BufferPage {
     /**
      * 待回收的虚拟Buffer
      */
-    private final ConcurrentLinkedQueue<VirtualBuffer> cleanBuffers = new ConcurrentLinkedQueue<>();
+    private final LockFreeQueue cleanBuffers = new LockFreeQueue(1024);
     /**
      * 当前空闲的虚拟Buffer
      */
@@ -225,7 +225,15 @@ public class BufferPage {
     void clean(VirtualBuffer cleanBuffer) {
         long s = System.nanoTime();
         releasedCnt.add(1);
-        cleanBuffers.offer(cleanBuffer);
+        if (!cleanBuffers.offer(cleanBuffer)) {
+            lock.lock();
+            try {
+                clean0(cleanBuffer);
+            } finally {
+                lock.unlock();
+            }
+
+        }
         releasedTimes.add(System.nanoTime() - s);
     }
 
@@ -291,7 +299,8 @@ public class BufferPage {
      */
     void release() {
         if (buffer.isDirect()) {
-            //Unsafe.getUnsafe().invokeCleaner(buffer);
+//            Unsafe.getUnsafe().invokeCleaner(buffer);
+            ((DirectBuffer) buffer).cleaner().clean();
         }
     }
 
