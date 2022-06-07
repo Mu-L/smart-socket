@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.ListIterator;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -51,6 +52,11 @@ public class BufferPage {
      * 内存页是否处于空闲状态
      */
     private boolean idle = true;
+
+    private final LongAdder allocatedCnt = new LongAdder();
+    private final LongAdder allocatedTimes = new LongAdder();
+    private final LongAdder releasedCnt = new LongAdder();
+    private final LongAdder releasedTimes = new LongAdder();
 
     /**
      * @param size   缓存页大小
@@ -103,6 +109,9 @@ public class BufferPage {
      * @return 虚拟内存对象
      */
     private VirtualBuffer allocate0(final int size) {
+        long s = System.nanoTime();
+        allocatedCnt.add(1);
+
         idle = false;
         VirtualBuffer cleanBuffer = cleanBuffers.poll();
         if (cleanBuffer != null && cleanBuffer.getCapacity() >= size) {
@@ -136,6 +145,7 @@ public class BufferPage {
             return bufferChunk;
         } finally {
             lock.unlock();
+            allocatedTimes.add(System.nanoTime() - s);
         }
     }
 
@@ -213,7 +223,10 @@ public class BufferPage {
      * @param cleanBuffer 待回收的虚拟内存
      */
     void clean(VirtualBuffer cleanBuffer) {
+        long s = System.nanoTime();
+        releasedCnt.add(1);
         cleanBuffers.offer(cleanBuffer);
+        releasedTimes.add(System.nanoTime() - s);
     }
 
     /**
@@ -284,6 +297,14 @@ public class BufferPage {
 
     @Override
     public String toString() {
-        return "BufferPage{availableBuffers=" + availableBuffers + ", cleanBuffers=" + cleanBuffers + '}';
+        //return "BufferPage{availableBuffers=" + availableBuffers + ", cleanBuffers=" + cleanBuffers + '}';
+        long ac = allocatedCnt.longValue();
+        long at = allocatedTimes.longValue();
+        long rc = releasedCnt.longValue();
+        long rt = releasedTimes.longValue();
+
+
+        return String.format("fixed-buffer-page size, allocatedTimes(%d)/allocatedCnt(%d) = %.10f, releaseTimes(%d)/releaseCnt(%d) = %.10f ",
+                at, ac, at*1.0/ac, rt, rc, rt*1.0/rc);
     }
 }

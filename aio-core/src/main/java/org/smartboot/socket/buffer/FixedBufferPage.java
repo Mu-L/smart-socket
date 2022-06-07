@@ -6,6 +6,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.LongAdder;
 
 /**
  * @author qinluo
@@ -21,6 +22,7 @@ public class FixedBufferPage extends BufferPage {
     private static long arrayOffset;
     private static int arrayScale;
     private static int shift;
+    private static long cursorShift;
 
     private int size;
     private int part;
@@ -28,6 +30,12 @@ public class FixedBufferPage extends BufferPage {
     private int[] bitMap;
     private volatile boolean running;
     private static final Unsafe unsafe = UnSafeUtils.getUnsafe();
+    private final LongAdder allocatedCnt = new LongAdder();
+    private final LongAdder allocatedTimes = new LongAdder();
+    private final LongAdder releasedCnt = new LongAdder();
+    private final LongAdder releasedTimes = new LongAdder();
+    private final LongAdder used = new LongAdder();
+    private int cursor;
 
     FixedBufferPage(BufferPage[] poolPages, int size, boolean direct) {
         super(poolPages, 0, direct);
@@ -68,7 +76,33 @@ public class FixedBufferPage extends BufferPage {
             }
         }
 
+        long escaped = System.nanoTime();
+        allocatedCnt.add(1);
+        if (used.sum() >= part) {
+            return null;
+        }
         VirtualBuffer allocated = null;
+        used.add(1);
+        int start = cursor;
+        for (;;) {
+            if (unsafe.compareAndSwapInt(this, cursorShift, start, start + 1)) {
+                if (start < part && bitMap[start] == CLEAN && unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)start << shift), CLEAN, DIRTY)) {
+                    allocated = virtualBuffers[start];
+                    allocated.buffer().clear();
+                    allocated.recycle();
+                    return allocated;
+                }
+            }
+            start = cursor;
+            if (start > part) {
+                cursor = 0;
+                break;
+            }
+
+        }
+
+
+
         for (int i = 0; i < part; i++) {
             if (bitMap[i] == CLEAN && unsafe.compareAndSwapInt(bitMap, arrayOffset + ((long)i << shift), CLEAN, DIRTY)) {
                 allocated = virtualBuffers[i];
@@ -76,30 +110,12 @@ public class FixedBufferPage extends BufferPage {
             }
         }
 
-        if  (allocated == null) {
-            // slow allocate in other page.
-//            for (BufferPage poolPage : poolPages) {
-//                if ((allocated = poolPage.allocate(size)) != null) {
-//                    return allocated;
-//                }
-//            }
-            int c = 0;
-            for (int i = 0; i < part; i++) {
-
-                if (bitMap[i] == CLEAN) {
-                    c++;
-                }
-            }
-
-            System.out.println("disabled allocate from other page." + c);
-
-        }
-
         if (allocated != null) {
             allocated.buffer().clear();
             allocated.recycle();
         }
 
+        allocatedTimes.add(System.nanoTime() - escaped);
         return allocated;
     }
 
@@ -113,6 +129,9 @@ public class FixedBufferPage extends BufferPage {
             return;
         }
 
+        long time = System.nanoTime();
+        releasedCnt.add(1);
+        used.add(-1);
         int cleanIndex = cleanBuffer.getIndex();
         if (bitMap[cleanIndex] == CLEAN) {
             // Error invoke.
@@ -126,6 +145,7 @@ public class FixedBufferPage extends BufferPage {
             System.out.println("failed to clean");
         }
 
+        releasedTimes.add(System.nanoTime() - time);
     }
 
     @Override
@@ -146,12 +166,24 @@ public class FixedBufferPage extends BufferPage {
 
     @Override
     public String toString() {
-        return "fixed-buffer-page size " + this.size /*+ " bitMap " + Arrays.toString(bitMap)*/;
+        long ac = allocatedCnt.longValue();
+        long at = allocatedTimes.longValue();
+        long rc = releasedCnt.longValue();
+        long rt = releasedTimes.longValue();
+
+
+        return String.format("fixed-buffer-page size, allocatedTimes(%d)/allocatedCnt(%d) = %.10f, releaseTimes(%d)/releaseCnt(%d) = %.10f ",
+                at, ac, at*1.0/ac, rt, rc, rt*1.0/rc);
     }
 
     static {
-        arrayOffset = unsafe.arrayBaseOffset(int[].class);
-        arrayScale = unsafe.arrayIndexScale(int[].class);
-        shift = 31 - Integer.numberOfLeadingZeros(arrayScale);
+        try {
+            arrayOffset = unsafe.arrayBaseOffset(int[].class);
+            arrayScale = unsafe.arrayIndexScale(int[].class);
+            shift = 31 - Integer.numberOfLeadingZeros(arrayScale);
+            cursorShift = unsafe.objectFieldOffset(FixedBufferPage.class.getDeclaredField("cursor"));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }
