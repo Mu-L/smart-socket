@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.nio.channels.AsynchronousChannelGroup;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
+import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.AsynchronousChannelProvider;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
@@ -44,7 +45,7 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
     /**
      * write工作组
      */
-    private final Worker[] writeWorkers;
+    private final Worker[] commonWorkers;
     /**
      * read工作组
      */
@@ -53,19 +54,12 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
      * 线程池分配索引
      */
     private final AtomicInteger readIndex = new AtomicInteger(0);
-    private final AtomicInteger writeIndex = new AtomicInteger(0);
+    private final AtomicInteger commonIndex = new AtomicInteger(0);
     /**
      * 定时任务线程池
      */
     private final ScheduledThreadPoolExecutor scheduledExecutor;
-    /**
-     * 服务端accept线程池
-     */
-    private final ExecutorService acceptExecutorService;
-    /**
-     * accept工作组
-     */
-    private final Worker[] acceptWorkers;
+
     private Worker futureWorker;
     /**
      * 同步IO线程池
@@ -89,6 +83,7 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
         for (int i = 0; i < threadNum; i++) {
             readWorkers[i] = new Worker(Selector.open(), selectionKey -> {
                 EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
+                selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_READ);
                 asynchronousSocketChannel.doRead(true);
             });
             this.readExecutorService.execute(readWorkers[i]);
@@ -96,37 +91,35 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
 
         //init threadPool for write and connect
         final int writeThreadNum = 1;
-        final int acceptThreadNum = 1;
         writeExecutorService = getSingleThreadExecutor("smart-socket:write");
-        this.writeWorkers = new Worker[writeThreadNum];
+        this.commonWorkers = new Worker[writeThreadNum];
 
         for (int i = 0; i < writeThreadNum; i++) {
-            writeWorkers[i] = new Worker(Selector.open(), selectionKey -> {
-                EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
-                //直接调用interestOps的效果比 removeOps(selectionKey, SelectionKey.OP_WRITE) 更好
-                selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_WRITE);
-                asynchronousSocketChannel.doWrite();
-            });
-            writeExecutorService.execute(writeWorkers[i]);
-        }
-
-        //init threadPool for accept
-        acceptExecutorService = getSingleThreadExecutor("smart-socket:connect");
-        acceptWorkers = new Worker[acceptThreadNum];
-        for (int i = 0; i < acceptThreadNum; i++) {
-            acceptWorkers[i] = new Worker(Selector.open(), selectionKey -> {
-                if (selectionKey.isAcceptable()) {
+            commonWorkers[i] = new Worker(Selector.open(), selectionKey -> {
+                if (selectionKey.isWritable()) {
+                    EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
+                    selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_WRITE);
+                    asynchronousSocketChannel.doWrite();
+                } else if (selectionKey.isAcceptable()) {
                     EnhanceAsynchronousServerSocketChannel serverSocketChannel = (EnhanceAsynchronousServerSocketChannel) selectionKey.attachment();
                     serverSocketChannel.doAccept();
                 } else if (selectionKey.isConnectable()) {
-                    EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
-                    asynchronousSocketChannel.doConnect();
+                    Consumer<SelectionKey> consumer = (Consumer<SelectionKey>) selectionKey.attachment();
+                    consumer.accept(selectionKey);
                 }
             });
-            acceptExecutorService.execute(acceptWorkers[i]);
+            writeExecutorService.execute(commonWorkers[i]);
         }
 
         scheduledExecutor = new ScheduledThreadPoolExecutor(1, r -> new Thread(r, "smart-socket:scheduled"));
+    }
+
+    public SelectionKey futureKey(SocketChannel channel) {
+        if (futureWorker == null) {
+            return null;
+        } else {
+            return channel.keyFor(futureWorker.selector);
+        }
     }
 
     /**
@@ -139,11 +132,11 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
                 EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
                 switch (opType) {
                     case SelectionKey.OP_READ:
-                        removeOps(selectionKey, SelectionKey.OP_READ);
+                        selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_READ);
                         asynchronousSocketChannel.doRead(true);
                         break;
                     case SelectionKey.OP_WRITE:
-                        removeOps(selectionKey, SelectionKey.OP_WRITE);
+                        selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_WRITE);
                         asynchronousSocketChannel.doWrite();
                         break;
                     default:
@@ -161,32 +154,12 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
                 new LinkedBlockingQueue<>(), r -> new Thread(r, prefix));
     }
 
-    /**
-     * 移除关注事件
-     *
-     * @param selectionKey 待操作的selectionKey
-     * @param opt          移除的事件
-     */
-    public void removeOps(SelectionKey selectionKey, int opt) {
-        if ((selectionKey.interestOps() & opt) != 0) {
-            selectionKey.interestOps(selectionKey.interestOps() & ~opt);
-        }
-    }
-
     public Worker getReadWorker() {
         return readWorkers[(readIndex.getAndIncrement() & Integer.MAX_VALUE) % readWorkers.length];
     }
 
-    public Worker getWriteWorker() {
-        return writeWorkers[(writeIndex.getAndIncrement() & Integer.MAX_VALUE) % writeWorkers.length];
-    }
-
-    public Worker getAcceptWorker() {
-        return acceptWorkers[(writeIndex.getAndIncrement() & Integer.MAX_VALUE) % acceptWorkers.length];
-    }
-
-    public Worker getConnectWorker() {
-        return acceptWorkers[(writeIndex.getAndIncrement() & Integer.MAX_VALUE) % acceptWorkers.length];
+    public Worker getCommonWorker() {
+        return commonWorkers[(commonIndex.getAndIncrement() & Integer.MAX_VALUE) % commonWorkers.length];
     }
 
     public ScheduledThreadPoolExecutor getScheduledExecutor() {
@@ -208,9 +181,6 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
         running = false;
         readExecutorService.shutdown();
         writeExecutorService.shutdown();
-        if (acceptExecutorService != null) {
-            acceptExecutorService.shutdown();
-        }
         if (futureExecutorService != null) {
             futureExecutorService.shutdown();
         }
@@ -222,9 +192,6 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
         running = false;
         readExecutorService.shutdownNow();
         writeExecutorService.shutdownNow();
-        if (acceptExecutorService != null) {
-            acceptExecutorService.shutdownNow();
-        }
         if (futureExecutorService != null) {
             futureExecutorService.shutdownNow();
         }
@@ -251,7 +218,7 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
         /**
          * 当前Worker绑定的Selector
          */
-        private final Selector selector;
+        final Selector selector;
         private final Consumer<SelectionKey> consumer;
         private final ConcurrentLinkedQueue<Consumer<Selector>> consumers = new ConcurrentLinkedQueue<>();
         int invoker = 0;

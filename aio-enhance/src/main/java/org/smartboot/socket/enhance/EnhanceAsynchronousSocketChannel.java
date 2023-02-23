@@ -23,9 +23,11 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.ShutdownChannelGroupException;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.WritePendingException;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 /**
  * 模拟JDK7的AIO处理方式
@@ -49,27 +51,16 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
     /**
      * 处理 write 事件的线程资源
      */
-    private final EnhanceAsynchronousChannelGroup.Worker writeWorker;
-    /**
-     * 处理 connect 事件的线程资源
-     */
-    private final EnhanceAsynchronousChannelGroup.Worker connectWorker;
+    private final EnhanceAsynchronousChannelGroup.Worker commonWorker;
     /**
      * 用于接收 read 通道数据的缓冲区，经解码后腾出缓冲区以供下一批数据的读取
      */
     private ByteBuffer readBuffer;
     /**
-     * 用于接收 read 通道数据的缓冲区集合
-     */
-    private ByteBufferArray scatteringReadBuffer;
-    /**
      * 存放待输出数据的缓冲区
      */
     private ByteBuffer writeBuffer;
-    /**
-     * 存放待输出数据的缓冲区集合
-     */
-    private ByteBufferArray gatheringWriteBuffer;
+
     /**
      * read 回调事件处理器
      */
@@ -78,10 +69,7 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
      * write 回调事件处理器
      */
     private CompletionHandler<Number, Object> writeCompletionHandler;
-    /**
-     * connect 回调事件处理器
-     */
-    private CompletionHandler<Void, Object> connectCompletionHandler;
+
     private FutureCompletionHandler<Void, Void> connectFuture;
     private FutureCompletionHandler<? extends Number, Object> readFuture;
     private FutureCompletionHandler<? extends Number, Object> writeFuture;
@@ -94,15 +82,6 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
      */
     private Object writeAttachment;
     /**
-     * connect 回调事件关联绑定的附件对象
-     */
-    private Object connectAttachment;
-    private SelectionKey readSelectionKey;
-    private SelectionKey readFutureSelectionKey;
-    private SelectionKey writeSelectionKey;
-    private SelectionKey writeFutureSelectionKey;
-    private SelectionKey connectSelectionKey;
-    /**
      * 当前是否正在执行 write 操作
      */
     private boolean writePending;
@@ -110,25 +89,17 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
      * 当前是否正在执行 read 操作
      */
     private boolean readPending;
-    /**
-     * 当前是否正在执行 connect 操作
-     */
-    private boolean connectionPending;
-    /**
-     * 远程连接的地址
-     */
-    private SocketAddress remote;
+
     private int writeInvoker;
 
-    private boolean lowMemory;
+    private final boolean lowMemory;
 
     public EnhanceAsynchronousSocketChannel(EnhanceAsynchronousChannelGroup group, SocketChannel channel, boolean lowMemory) throws IOException {
         super(group.provider());
         this.group = group;
-        this.channel = channel;
+        this.channel = Objects.requireNonNull(channel);
         readWorker = group.getReadWorker();
-        writeWorker = group.getWriteWorker();
-        connectWorker = group.getConnectWorker();
+        commonWorker = group.getCommonWorker();
         this.lowMemory = lowMemory;
     }
 
@@ -136,31 +107,23 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
     public void close() throws IOException {
         IOException exception = null;
         try {
-            if (channel != null && channel.isOpen()) {
+            if (channel.isOpen()) {
                 channel.close();
             }
         } catch (IOException e) {
             exception = e;
         }
+        SelectionKey readSelectionKey = channel.keyFor(readWorker.selector);
         if (readSelectionKey != null) {
             readSelectionKey.cancel();
-            readSelectionKey = null;
         }
-        if (readFutureSelectionKey != null) {
-            readFutureSelectionKey.cancel();
-            readFutureSelectionKey = null;
-        }
+        SelectionKey writeSelectionKey = channel.keyFor(commonWorker.selector);
         if (writeSelectionKey != null) {
             writeSelectionKey.cancel();
-            writeSelectionKey = null;
         }
-        if (writeFutureSelectionKey != null) {
-            writeFutureSelectionKey.cancel();
-            writeFutureSelectionKey = null;
-        }
-        if (connectSelectionKey != null) {
-            connectSelectionKey.cancel();
-            connectSelectionKey = null;
+        SelectionKey futureKey = group.futureKey(channel);
+        if (futureKey != null) {
+            futureKey.cancel();
         }
         if (exception != null) {
             throw exception;
@@ -214,14 +177,10 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
         if (channel.isConnected()) {
             throw new AlreadyConnectedException();
         }
-        if (connectionPending) {
+        if (channel.isConnectionPending()) {
             throw new ConnectionPendingException();
         }
-        connectionPending = true;
-        this.connectAttachment = attachment;
-        this.connectCompletionHandler = (CompletionHandler<Void, Object>) handler;
-        this.remote = remote;
-        doConnect();
+        doConnect(remote, attachment, (CompletionHandler<Void, Object>) handler);
     }
 
     @Override
@@ -234,16 +193,15 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
 
     @Override
     public <A> void read(ByteBuffer dst, long timeout, TimeUnit unit, A attachment, CompletionHandler<Integer, ? super A> handler) {
-        read0(dst, null, timeout, unit, attachment, handler);
+        read0(dst, timeout, unit, attachment, handler);
     }
 
-    private <V extends Number, A> void read0(ByteBuffer readBuffer, ByteBufferArray scattering, long timeout, TimeUnit unit, A attachment, CompletionHandler<V, ? super A> handler) {
+    private <V extends Number, A> void read0(ByteBuffer readBuffer, long timeout, TimeUnit unit, A attachment, CompletionHandler<V, ? super A> handler) {
         if (readPending) {
             throw new ReadPendingException();
         }
         readPending = true;
         this.readBuffer = readBuffer;
-        this.scatteringReadBuffer = scattering;
         this.readAttachment = attachment;
         if (timeout > 0) {
             readFuture = new FutureCompletionHandler<>((CompletionHandler<Number, Object>) handler, readAttachment);
@@ -265,22 +223,21 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
 
     @Override
     public <A> void read(ByteBuffer[] dsts, int offset, int length, long timeout, TimeUnit unit, A attachment, CompletionHandler<Long, ? super A> handler) {
-        read0(null, new ByteBufferArray(dsts, offset, length), timeout, unit, attachment, handler);
+        throw new UnsupportedOperationException();
     }
 
     @Override
     public <A> void write(ByteBuffer src, long timeout, TimeUnit unit, A attachment, CompletionHandler<Integer, ? super A> handler) {
-        write0(src, null, timeout, unit, attachment, handler);
+        write0(src, timeout, unit, attachment, handler);
     }
 
-    private <V extends Number, A> void write0(ByteBuffer writeBuffer, ByteBufferArray gathering, long timeout, TimeUnit unit, A attachment, CompletionHandler<V, ? super A> handler) {
+    private <V extends Number, A> void write0(ByteBuffer writeBuffer, long timeout, TimeUnit unit, A attachment, CompletionHandler<V, ? super A> handler) {
         if (writePending) {
             throw new WritePendingException();
         }
 
         writePending = true;
         this.writeBuffer = writeBuffer;
-        this.gatheringWriteBuffer = gathering;
         this.writeAttachment = attachment;
         if (timeout > 0) {
             writeFuture = new FutureCompletionHandler<>((CompletionHandler<Number, Object>) handler, writeAttachment);
@@ -296,13 +253,13 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
     public Future<Integer> write(ByteBuffer src) {
         FutureCompletionHandler<Integer, Object> writeFuture = new FutureCompletionHandler<>();
         this.writeFuture = writeFuture;
-        write0(src, null, 0, TimeUnit.MILLISECONDS, null, writeFuture);
+        write0(src, 0, TimeUnit.MILLISECONDS, null, writeFuture);
         return writeFuture;
     }
 
     @Override
     public <A> void write(ByteBuffer[] srcs, int offset, int length, long timeout, TimeUnit unit, A attachment, CompletionHandler<Long, ? super A> handler) {
-        write0(null, new ByteBufferArray(srcs, offset, length), timeout, unit, attachment, handler);
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -310,7 +267,7 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
         return channel.getLocalAddress();
     }
 
-    public void doConnect() {
+    public void doConnect(SocketAddress address, Object attachment, CompletionHandler<Void, Object> handler) {
         try {
             //此前通过Future调用,且触发了cancel
             if (connectFuture != null && connectFuture.isDone()) {
@@ -318,44 +275,37 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
                 return;
             }
             boolean connected = channel.isConnectionPending();
-            if (connected || channel.connect(remote)) {
+            if (connected || channel.connect(address)) {
                 connected = channel.finishConnect();
             }
             channel.configureBlocking(false);
             if (connected) {
-                CompletionHandler<Void, Object> completionHandler = connectCompletionHandler;
-                Object attach = connectAttachment;
                 resetConnect();
-                completionHandler.completed(null, attach);
-            } else if (connectSelectionKey == null) {
-                connectWorker.addRegister(selector -> {
+                handler.completed(null, attachment);
+            } else {
+                commonWorker.addRegister(selector -> {
                     try {
-                        connectSelectionKey = channel.register(selector, SelectionKey.OP_CONNECT, EnhanceAsynchronousSocketChannel.this);
+                        channel.register(selector, SelectionKey.OP_CONNECT, (Consumer<SelectionKey>) selectionKey -> doConnect(address, attachment, handler));
                     } catch (ClosedChannelException e) {
-                        connectCompletionHandler.failed(e, connectAttachment);
+                        handler.failed(e, attachment);
                     }
                 });
-            } else {
-                throw new IOException("unKnow exception");
             }
         } catch (IOException e) {
-            connectCompletionHandler.failed(e, connectAttachment);
+            handler.failed(e, attachment);
         }
 
     }
 
     private void resetConnect() {
-        connectionPending = false;
         connectFuture = null;
-        connectAttachment = null;
-        connectCompletionHandler = null;
     }
 
     public void doRead(boolean direct) {
         try {
             //此前通过Future调用,且触发了cancel
             if (readFuture != null && readFuture.isDone()) {
-                group.removeOps(readSelectionKey, SelectionKey.OP_READ);
+                channel.keyFor(readWorker.selector).interestOps(channel.keyFor(readWorker.selector).interestOps() & ~SelectionKey.OP_READ);
                 resetRead();
                 return;
             }
@@ -369,23 +319,15 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
             boolean directRead = direct || (Thread.currentThread() == readWorker.getWorkerThread() && readWorker.invoker++ < EnhanceAsynchronousChannelGroup.MAX_INVOKER);
 
             long readSize = 0;
-            boolean hasRemain = true;
             if (directRead) {
-                if (scatteringReadBuffer != null) {
-                    readSize = channel.read(scatteringReadBuffer.getBuffers(), scatteringReadBuffer.getOffset(), scatteringReadBuffer.getLength());
-                    hasRemain = hasRemaining(scatteringReadBuffer);
-                } else {
-                    readSize = channel.read(readBuffer);
-                    hasRemain = readBuffer.hasRemaining();
-                }
+                readSize = channel.read(readBuffer);
             }
 
             //注册至异步线程
             if (readFuture != null && readSize == 0) {
-                group.removeOps(readSelectionKey, SelectionKey.OP_READ);
                 group.registerFuture(selector -> {
                     try {
-                        readFutureSelectionKey = channel.register(selector, SelectionKey.OP_READ, EnhanceAsynchronousSocketChannel.this);
+                        channel.register(selector, SelectionKey.OP_READ, EnhanceAsynchronousSocketChannel.this);
                     } catch (ClosedChannelException e) {
                         e.printStackTrace();
                         doRead(true);
@@ -397,26 +339,18 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
             if (lowMemory && readSize == 0 && readBuffer.position() == 0) {
                 readBuffer = null;
                 readCompletionHandler.completed(EnhanceAsynchronousChannelProvider.READ_MONITOR_SIGNAL, readAttachment);
-            }
-
-            if (readSize != 0 || !hasRemain) {
+            } else if (readSize != 0 || !readBuffer.hasRemaining()) {
                 CompletionHandler<Number, Object> completionHandler = readCompletionHandler;
                 Object attach = readAttachment;
-                ByteBufferArray scattering = scatteringReadBuffer;
                 resetRead();
-                if (scattering == null) {
-                    completionHandler.completed((int) readSize, attach);
-                } else {
-                    completionHandler.completed(readSize, attach);
-                }
-
-                if (!readPending && readSelectionKey != null) {
-                    group.removeOps(readSelectionKey, SelectionKey.OP_READ);
-                }
-            } else if (readSelectionKey == null) {
+                completionHandler.completed((int) readSize, attach);
+                return;
+            }
+            SelectionKey readSelectionKey = channel.keyFor(readWorker.selector);
+            if (readSelectionKey == null) {
                 readWorker.addRegister(selector -> {
                     try {
-                        readSelectionKey = channel.register(selector, SelectionKey.OP_READ, EnhanceAsynchronousSocketChannel.this);
+                        channel.register(selector, SelectionKey.OP_READ, EnhanceAsynchronousSocketChannel.this);
                     } catch (ClosedChannelException e) {
                         readCompletionHandler.failed(e, readAttachment);
                     }
@@ -445,7 +379,6 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
         readCompletionHandler = null;
         readAttachment = null;
         readBuffer = null;
-        scatteringReadBuffer = null;
     }
 
     public void doWrite() {
@@ -457,31 +390,23 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
             }
             int invoker = 0;
             //防止无限递归导致堆栈溢出
-            if (writeWorker.getWorkerThread() == Thread.currentThread()) {
-                invoker = ++writeWorker.invoker;
+            if (commonWorker.getWorkerThread() == Thread.currentThread()) {
+                invoker = ++commonWorker.invoker;
             } else if (readWorker.getWorkerThread() != Thread.currentThread()) {
                 invoker = ++writeInvoker;
             }
             int writeSize = 0;
-            boolean hasRemain = true;
             if (invoker < EnhanceAsynchronousChannelGroup.MAX_INVOKER) {
-                if (gatheringWriteBuffer != null) {
-                    writeSize = (int) channel.write(gatheringWriteBuffer.getBuffers(), gatheringWriteBuffer.getOffset(), gatheringWriteBuffer.getLength());
-                    hasRemain = hasRemaining(gatheringWriteBuffer);
-                } else {
-                    writeSize = channel.write(writeBuffer);
-                    hasRemain = writeBuffer.hasRemaining();
-                }
+                writeSize = channel.write(writeBuffer);
             } else {
                 writeInvoker = 0;
             }
 
             //注册至异步线程
-            if (writeFuture != null && writeSize == 0) {
-                group.removeOps(writeSelectionKey, SelectionKey.OP_WRITE);
+            if (writeFuture != null && writeBuffer.hasRemaining()) {
                 group.registerFuture(selector -> {
                     try {
-                        writeFutureSelectionKey = channel.register(selector, SelectionKey.OP_WRITE, EnhanceAsynchronousSocketChannel.this);
+                        channel.register(selector, SelectionKey.OP_WRITE, EnhanceAsynchronousSocketChannel.this);
                     } catch (ClosedChannelException e) {
                         e.printStackTrace();
                         doWrite();
@@ -490,21 +415,26 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
                 return;
             }
 
-            if (writeSize != 0 || !hasRemain) {
+            //EOF 或者全部输出完毕
+            if (writeSize == -1 || !writeBuffer.hasRemaining()) {
                 CompletionHandler<Number, Object> completionHandler = writeCompletionHandler;
                 Object attach = writeAttachment;
                 resetWrite();
-                completionHandler.completed(writeSize, attach);
-            } else if (writeSelectionKey == null) {
-                writeWorker.addRegister(selector -> {
+                completionHandler.completed(writeSize == -1 ? -1 : writeBuffer.limit(), attach);
+                return;
+            }
+
+            SelectionKey writeSelectionKey = channel.keyFor(commonWorker.selector);
+            if (writeSelectionKey == null) {
+                commonWorker.addRegister(selector -> {
                     try {
-                        writeSelectionKey = channel.register(selector, SelectionKey.OP_WRITE, EnhanceAsynchronousSocketChannel.this);
+                        channel.register(selector, SelectionKey.OP_WRITE, EnhanceAsynchronousSocketChannel.this);
                     } catch (ClosedChannelException e) {
                         writeCompletionHandler.failed(e, writeAttachment);
                     }
                 });
             } else {
-                group.interestOps(writeWorker, writeSelectionKey, SelectionKey.OP_WRITE);
+                group.interestOps(commonWorker, writeSelectionKey, SelectionKey.OP_WRITE);
             }
         } catch (Throwable e) {
             if (writeCompletionHandler == null) {
@@ -520,22 +450,12 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
         }
     }
 
-    private boolean hasRemaining(ByteBufferArray scattering) {
-        for (int i = 0; i < scattering.getLength(); i++) {
-            if (scattering.getBuffers()[scattering.getOffset() + i].hasRemaining()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     private void resetWrite() {
         writePending = false;
         writeFuture = null;
         writeAttachment = null;
         writeCompletionHandler = null;
         writeBuffer = null;
-        gatheringWriteBuffer = null;
     }
 
     @Override

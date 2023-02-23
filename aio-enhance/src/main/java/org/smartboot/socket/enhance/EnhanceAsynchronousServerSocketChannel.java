@@ -43,7 +43,7 @@ final class EnhanceAsynchronousServerSocketChannel extends AsynchronousServerSoc
         this.enhanceAsynchronousChannelGroup = enhanceAsynchronousChannelGroup;
         serverSocketChannel = ServerSocketChannel.open();
         serverSocketChannel.configureBlocking(false);
-        acceptWorker = enhanceAsynchronousChannelGroup.getAcceptWorker();
+        acceptWorker = enhanceAsynchronousChannelGroup.getCommonWorker();
         this.lowMemory = lowMemory;
     }
 
@@ -85,7 +85,7 @@ final class EnhanceAsynchronousServerSocketChannel extends AsynchronousServerSoc
             //此前通过Future调用,且触发了cancel
             if (acceptFuture != null && acceptFuture.isDone()) {
                 resetAccept();
-                enhanceAsynchronousChannelGroup.removeOps(selectionKey, SelectionKey.OP_ACCEPT);
+                selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_ACCEPT);
                 return;
             }
             boolean directAccept = (acceptWorker.getWorkerThread() == Thread.currentThread()
@@ -103,7 +103,7 @@ final class EnhanceAsynchronousServerSocketChannel extends AsynchronousServerSoc
                 resetAccept();
                 completionHandler.completed(asynchronousSocketChannel, attach);
                 if (!acceptPending && selectionKey != null) {
-                    enhanceAsynchronousChannelGroup.removeOps(selectionKey, SelectionKey.OP_ACCEPT);
+                    selectionKey.interestOps(selectionKey.interestOps() & ~SelectionKey.OP_ACCEPT);
                 }
             }
             //首次注册selector
@@ -111,7 +111,6 @@ final class EnhanceAsynchronousServerSocketChannel extends AsynchronousServerSoc
                 acceptWorker.addRegister(selector -> {
                     try {
                         selectionKey = serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT, EnhanceAsynchronousServerSocketChannel.this);
-//                        selectionKey.attach(EnhanceAsynchronousServerSocketChannel.this);
                     } catch (ClosedChannelException e) {
                         acceptCompletionHandler.failed(e, attachment);
                     }
