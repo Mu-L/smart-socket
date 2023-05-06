@@ -38,22 +38,33 @@ public final class EnhanceAsynchronousChannelProvider extends AsynchronousChanne
      * 低内存模式
      */
     private final boolean lowMemory;
+    /**
+     * 分发模式
+     */
+    private final boolean dispatch;
+
 
     public EnhanceAsynchronousChannelProvider(boolean lowMemory) {
-        this.lowMemory = lowMemory;
+        this(lowMemory, false);
     }
+
+    public EnhanceAsynchronousChannelProvider(boolean lowMemory, boolean dispatch) {
+        this.lowMemory = lowMemory;
+        this.dispatch = dispatch;
+    }
+
 
     @Override
     public AsynchronousChannelGroup openAsynchronousChannelGroup(int nThreads, ThreadFactory threadFactory) throws IOException {
         return new EnhanceAsynchronousChannelGroup(this, new ThreadPoolExecutor(nThreads, nThreads,
                 0L, TimeUnit.MILLISECONDS,
                 new ArrayBlockingQueue<>(nThreads),
-                threadFactory), nThreads);
+                threadFactory), nThreads, dispatch);
     }
 
     @Override
     public AsynchronousChannelGroup openAsynchronousChannelGroup(ExecutorService executor, int initialSize) throws IOException {
-        return new EnhanceAsynchronousChannelGroup(this, executor, initialSize);
+        return new EnhanceAsynchronousChannelGroup(this, executor, initialSize, dispatch);
     }
 
     @Override

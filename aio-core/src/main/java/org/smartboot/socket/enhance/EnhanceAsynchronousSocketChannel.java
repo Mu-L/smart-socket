@@ -101,6 +101,8 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
     private boolean connectionPending;
     private int writeInvoker;
 
+    private int readInvoker;
+
     private final boolean lowMemory;
 
     public EnhanceAsynchronousSocketChannel(EnhanceAsynchronousChannelGroup group, SocketChannel channel, boolean lowMemory) throws IOException {
@@ -321,13 +323,23 @@ final class EnhanceAsynchronousSocketChannel extends AsynchronousSocketChannel {
                 completionHandler.completed(EnhanceAsynchronousChannelProvider.READABLE_SIGNAL, attach);
                 return;
             }
-            boolean directRead = direct || (Thread.currentThread() == readWorker.getWorkerThread() && readWorker.invoker++ < EnhanceAsynchronousChannelGroup.MAX_INVOKER);
+
+            if (!direct) {
+                //防止无限递归导致堆栈溢出
+                if (readWorker.getWorkerThread() == Thread.currentThread()) {
+                    direct = ++readWorker.invoker < EnhanceAsynchronousChannelGroup.MAX_INVOKER;
+                } else {
+                    direct = ++readInvoker < EnhanceAsynchronousChannelGroup.MAX_INVOKER;
+                }
+            }
 
             long readSize = 0;
             boolean hasRemain = true;
-            if (directRead) {
+            if (direct) {
                 readSize = channel.read(readBuffer);
                 hasRemain = readBuffer.hasRemaining();
+            } else {
+                readInvoker = 0;
             }
 
             //注册至异步线程

@@ -15,6 +15,7 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.spi.AsynchronousChannelProvider;
 import java.util.Set;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -31,7 +32,7 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
     /**
      * 递归回调次数上限
      */
-    public static final int MAX_INVOKER = 8;
+    public static final int MAX_INVOKER = 16;
 
     /**
      * 读回调处理线程池,可用于业务处理
@@ -60,22 +61,53 @@ class EnhanceAsynchronousChannelGroup extends AsynchronousChannelGroup {
      */
     private boolean running = true;
 
+
     /**
      * Initialize a new instance of this class.
      *
      * @param provider The asynchronous channel provider for this group
      */
-    protected EnhanceAsynchronousChannelGroup(AsynchronousChannelProvider provider, ExecutorService readExecutorService, int threadNum) throws IOException {
+    protected EnhanceAsynchronousChannelGroup(AsynchronousChannelProvider provider, ExecutorService readExecutorService, int threadNum, boolean dispatch) throws IOException {
         super(provider);
         //init threadPool for read
         this.readExecutorService = readExecutorService;
-        this.readWorkers = new Worker[threadNum];
-        for (int i = 0; i < threadNum; i++) {
-            readWorkers[i] = new Worker(Selector.open(), selectionKey -> {
-                EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
-                asynchronousSocketChannel.doRead(true);
+
+        //启用分发模式
+        if (dispatch && threadNum > 1) {
+            this.readWorkers = new Worker[1];
+            ArrayBlockingQueue<SelectionKey> queue = new ArrayBlockingQueue<>(1024);
+            readWorkers[0] = new Worker(Selector.open(), selectionKey -> {
+                try {
+                    removeOps(selectionKey, SelectionKey.OP_READ);
+                    queue.put(selectionKey);
+                } catch (InterruptedException e) {
+                    throw new RuntimeException(e);
+                }
             });
-            this.readExecutorService.execute(readWorkers[i]);
+            this.readExecutorService.execute(readWorkers[0]);
+            for (int i = 1; i < threadNum; i++) {
+                this.readExecutorService.execute(() -> {
+                    while (running) {
+                        try {
+                            SelectionKey key = queue.take();
+                            EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) key.attachment();
+                            asynchronousSocketChannel.doRead(true);
+                        } catch (InterruptedException e) {
+                            throw new RuntimeException(e);
+                        }
+                    }
+                });
+            }
+
+        } else {
+            this.readWorkers = new Worker[threadNum];
+            for (int i = 0; i < threadNum; i++) {
+                readWorkers[i] = new Worker(Selector.open(), selectionKey -> {
+                    EnhanceAsynchronousSocketChannel asynchronousSocketChannel = (EnhanceAsynchronousSocketChannel) selectionKey.attachment();
+                    asynchronousSocketChannel.doRead(true);
+                });
+                this.readExecutorService.execute(readWorkers[i]);
+            }
         }
 
         //init threadPool for write and connect

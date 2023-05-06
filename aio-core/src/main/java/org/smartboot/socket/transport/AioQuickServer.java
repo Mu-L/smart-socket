@@ -116,7 +116,7 @@ public final class AioQuickServer {
             this.bufferPool = config.getBufferFactory().create();
             this.innerBufferPool = bufferPool;
         }
-        asynchronousChannelGroup = new EnhanceAsynchronousChannelProvider(lowMemory).openAsynchronousChannelGroup(config.getThreadNum(), new ThreadFactory() {
+        asynchronousChannelGroup = new EnhanceAsynchronousChannelProvider(lowMemory, true).openAsynchronousChannelGroup(config.getThreadNum(), new ThreadFactory() {
             private byte index = 0;
 
             @Override
